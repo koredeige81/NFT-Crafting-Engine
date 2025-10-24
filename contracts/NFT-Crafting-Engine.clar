@@ -10,6 +10,9 @@
 (define-constant err-token-not-found (err u105))
 (define-constant err-recipe-not-found (err u106))
 (define-constant err-cooldown-active (err u107))
+(define-constant err-not-listed (err u108))
+(define-constant err-already-listed (err u109))
+(define-constant err-insufficient-payment (err u110))
 
 (define-data-var last-token-id uint u0)
 (define-data-var crafting-fee uint u1000000)
@@ -42,6 +45,12 @@
 
 (define-map user-cooldowns principal uint)
 (define-map token-burn-history uint {burner: principal, burned-at: uint})
+
+(define-map marketplace-listings uint {
+    seller: principal,
+    price: uint,
+    listed-at: uint
+})
 
 (define-read-only (get-last-token-id)
     (var-get last-token-id)
@@ -76,6 +85,14 @@
         (var-get global-crafting-enabled)
         (< (get-user-cooldown user) stacks-block-height)
     )
+)
+
+(define-read-only (get-listing (token-id uint))
+    (map-get? marketplace-listings token-id)
+)
+
+(define-read-only (is-listed (token-id uint))
+    (is-some (map-get? marketplace-listings token-id))
 )
 
 (define-read-only (calculate-crafting-power (recipe-id uint) (event-id (optional uint)))
@@ -254,5 +271,49 @@
     (begin
         (asserts! (is-eq tx-sender contract-owner) err-owner-only)
         (mint-crafted-nft recipient name rarity power (list))
+    )
+)
+
+(define-public (list-nft (token-id uint) (price uint))
+    (let (
+        (token-owner (unwrap! (nft-get-owner? crafted-nft token-id) err-token-not-found))
+    )
+        (asserts! (is-eq tx-sender token-owner) err-not-token-owner)
+        (asserts! (not (is-listed token-id)) err-already-listed)
+        (asserts! (> price u0) err-invalid-recipe)
+        (map-set marketplace-listings token-id {
+            seller: tx-sender,
+            price: price,
+            listed-at: stacks-block-height
+        })
+        (ok true)
+    )
+)
+
+(define-public (delist-nft (token-id uint))
+    (let (
+        (listing (unwrap! (get-listing token-id) err-not-listed))
+        (token-owner (unwrap! (nft-get-owner? crafted-nft token-id) err-token-not-found))
+    )
+        (asserts! (is-eq tx-sender token-owner) err-not-token-owner)
+        (asserts! (is-eq tx-sender (get seller listing)) err-not-token-owner)
+        (map-delete marketplace-listings token-id)
+        (ok true)
+    )
+)
+
+(define-public (buy-nft (token-id uint))
+    (let (
+        (listing (unwrap! (get-listing token-id) err-not-listed))
+        (seller (get seller listing))
+        (price (get price listing))
+        (token-owner (unwrap! (nft-get-owner? crafted-nft token-id) err-token-not-found))
+    )
+        (asserts! (is-eq seller token-owner) err-not-token-owner)
+        (asserts! (not (is-eq tx-sender seller)) err-owner-only)
+        (try! (stx-transfer? price tx-sender seller))
+        (try! (nft-transfer? crafted-nft token-id seller tx-sender))
+        (map-delete marketplace-listings token-id)
+        (ok true)
     )
 )
