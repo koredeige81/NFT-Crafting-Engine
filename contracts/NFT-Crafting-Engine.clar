@@ -13,6 +13,8 @@
 (define-constant err-not-listed (err u108))
 (define-constant err-already-listed (err u109))
 (define-constant err-insufficient-payment (err u110))
+(define-constant err-batch-limit-exceeded (err u111))
+(define-constant max-batch-size u5)
 
 (define-data-var last-token-id uint u0)
 (define-data-var crafting-fee uint u1000000)
@@ -50,6 +52,12 @@
     seller: principal,
     price: uint,
     listed-at: uint
+})
+
+(define-map batch-craft-history principal {
+    total-batches: uint,
+    total-crafted: uint,
+    last-batch-block: uint
 })
 
 (define-read-only (get-last-token-id)
@@ -93,6 +101,11 @@
 
 (define-read-only (is-listed (token-id uint))
     (is-some (map-get? marketplace-listings token-id))
+)
+
+(define-read-only (get-batch-craft-history (user principal))
+    (default-to {total-batches: u0, total-crafted: u0, last-batch-block: u0} 
+        (map-get? batch-craft-history user))
 )
 
 (define-read-only (calculate-crafting-power (recipe-id uint) (event-id (optional uint)))
@@ -198,6 +211,50 @@
         (try! (burn-tokens token-ids tx-sender))
         (map-set user-cooldowns tx-sender (+ current-block u10))
         (mint-crafted-nft tx-sender output-name (get output-rarity recipe) crafting-power token-ids)
+    )
+)
+
+(define-private (process-single-batch-craft (craft-data {token-ids: (list 10 uint), recipe-id: uint, output-name: (string-ascii 64)}) (prev-result (response (list 5 uint) uint)))
+    (match prev-result
+        ok-list (let (
+            (recipe (unwrap! (get-crafting-recipe (get recipe-id craft-data)) (err u106)))
+            (crafting-power (calculate-crafting-power (get recipe-id craft-data) none))
+        )
+            (try! (validate-recipe-materials (get token-ids craft-data) (get recipe-id craft-data)))
+            (try! (burn-tokens (get token-ids craft-data) tx-sender))
+            (let (
+                (new-token-id (unwrap! (mint-crafted-nft tx-sender (get output-name craft-data) (get output-rarity recipe) crafting-power (get token-ids craft-data)) (err u105)))
+            )
+                (ok (unwrap! (as-max-len? (append ok-list new-token-id) u5) (err u111)))
+            )
+        )
+        err-val (err err-val)
+    )
+)
+
+(define-public (batch-craft-nft (crafts (list 5 {token-ids: (list 10 uint), recipe-id: uint, output-name: (string-ascii 64)})))
+    (let (
+        (batch-count (len crafts))
+        (total-fee (* (var-get crafting-fee) batch-count))
+        (current-block stacks-block-height)
+        (history (get-batch-craft-history tx-sender))
+    )
+        (asserts! (is-crafting-allowed tx-sender) err-cooldown-active)
+        (asserts! (var-get global-crafting-enabled) err-owner-only)
+        (asserts! (<= batch-count max-batch-size) err-batch-limit-exceeded)
+        (asserts! (> batch-count u0) err-invalid-recipe)
+        (try! (stx-transfer? total-fee tx-sender contract-owner))
+        (let (
+            (result (fold process-single-batch-craft crafts (ok (list))))
+        )
+            (map-set user-cooldowns tx-sender (+ current-block u10))
+            (map-set batch-craft-history tx-sender {
+                total-batches: (+ (get total-batches history) u1),
+                total-crafted: (+ (get total-crafted history) batch-count),
+                last-batch-block: current-block
+            })
+            result
+        )
     )
 )
 
